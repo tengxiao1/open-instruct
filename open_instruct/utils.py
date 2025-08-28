@@ -1074,6 +1074,7 @@ python scripts/submit_eval_jobs.py \
 --workspace "tulu-3-results" \
 --priority {eval_priority} \
 --preemptible \
+--gpu_multiplier 2 \
 --use_hf_tokenizer_template \
 --run_oe_eval_experiments \
 --skip_oi_evals"""

@@ -166,7 +166,7 @@ class Args:
     """The hash of the dataset configuration."""
     dataset_config_eval_hash: Optional[str] = None
     """The hash of the dataset configuration for evaluation."""
-    dataset_skip_cache: bool = False
+    dataset_skip_cache: bool = True
     """Whether to skip the cache."""
     shuffle_eval_dataset: bool = False
     """Whether to shuffle the evaluation dataset."""
@@ -267,6 +267,8 @@ class Args:
     record_entropy: bool = False
     """whether to record the entropy of the policy during training. Uses extra memory."""
 
+    fill_completions: bool = True
+    """Whether to refill the batchsize with after filtering."""
     # Reward
     # -- r1 style format reward
     apply_r1_style_format_reward: bool = False
@@ -1304,7 +1306,7 @@ def data_preparation_thread(
 
         # ------------------------------------------------------------------------------------------------
         # Pack sequences
-        if args.num_samples_per_prompt_rollout > 1:
+        if args.num_samples_per_prompt_rollout >= 1:
             queries = [item for item in queries for _ in range(args.num_samples_per_prompt_rollout)]
             ground_truths = [item for item in ground_truths for _ in range(args.num_samples_per_prompt_rollout)]
             datasets = [item for item in datasets for _ in range(args.num_samples_per_prompt_rollout)]
@@ -1358,6 +1360,11 @@ def data_preparation_thread(
             else:
                 raise ValueError(f"Invalid advantage normalization type: {args.advantage_normalization_type}")
 
+            # scores = np.array(scores)
+            # batch_mean = scores.mean()
+            # batch_std = scores.std()
+            # advantages = (scores - batch_mean) / (batch_std + 1e-8)
+
         with Timer("📦 [Data Preparation Thread] Filtering sequences"):
             # Here we get the max possible score for each prompt, and see how many prompts are unsolved
             max_possible_score = 0
@@ -1372,14 +1379,19 @@ def data_preparation_thread(
             real_batch_size_ratio = non_zero_std_mask.sum() * args.num_samples_per_prompt_rollout / len(scores)
             expanded_mask = np.repeat(non_zero_std_mask, args.num_samples_per_prompt_rollout)
             non_zero_gradient_index = np.where(expanded_mask)[0]
+            original_batch_size = len(scores)
             advantages = advantages[non_zero_gradient_index]
             scores = scores[non_zero_gradient_index]
             responses = [result.responses[i] for i in non_zero_gradient_index]
             masks = [result.masks[i] for i in non_zero_gradient_index]
             queries = [queries[i] for i in non_zero_gradient_index]
+            print("📊 [Data Preparation Thread] Sequences:")
+            print(tokenizer.batch_decode(queries[:1], skip_special_tokens=True))
             ground_truths = [ground_truths[i] for i in non_zero_gradient_index]
             datasets = [datasets[i] for i in non_zero_gradient_index]
             finish_reasons = [result.finish_reasons[i] for i in non_zero_gradient_index]
+
+  
             if args.mask_truncated_completions:
                 stop_idxes = torch.tensor([i for i in range(len(finish_reasons)) if finish_reasons[i] == "stop"])
                 scores = scores[stop_idxes]
@@ -1390,6 +1402,43 @@ def data_preparation_thread(
                 ground_truths = [ground_truths[i] for i in stop_idxes]
                 datasets = [datasets[i] for i in stop_idxes]
                 finish_reasons = [finish_reasons[i] for i in stop_idxes]
+
+            if args.fill_completions:
+                with Timer("⏱ [Data Preparation Thread] Refill completions"):
+                    current_batch_size = len(scores)  
+                    original_prompt_cnt = original_batch_size // args.num_samples_per_prompt_rollout
+                    current_prompt_cnt = current_batch_size // args.num_samples_per_prompt_rollout
+                    need_to_fill_prompt = original_prompt_cnt - current_prompt_cnt
+                    k = args.num_samples_per_prompt_rollout
+    
+                    if need_to_fill_prompt > 0 and current_prompt_cnt > 0:
+                        scores_matrix = scores.reshape(current_prompt_cnt, k)
+                        stds = scores_matrix.std(axis=1) + 1e-8
+                        probs = stds / stds.sum()
+    
+                        sampled_prompt_ids = np.random.choice(
+                            current_prompt_cnt,
+                            size=need_to_fill_prompt,
+                            replace=True,
+                            p=probs
+                        )
+    
+                        sampled_indices = []
+                        for pid in sampled_prompt_ids:
+                            start = pid * k
+                            sampled_indices.extend(range(start, start + k))
+    
+                        advantages = np.concatenate([advantages, advantages[sampled_indices]])
+                        scores = np.concatenate([scores, scores[sampled_indices]])
+                        responses += [responses[i] for i in sampled_indices]
+                        masks += [masks[i] for i in sampled_indices]
+                        queries += [queries[i] for i in sampled_indices]
+                        ground_truths += [ground_truths[i] for i in sampled_indices]
+                        datasets += [datasets[i] for i in sampled_indices]
+                        finish_reasons += [finish_reasons[i] for i in sampled_indices]
+    
+                        print(f"📊 Duplicated {need_to_fill_prompt} prompts from {len(sampled_indices)} total responses")
+         
 
         with Timer("📦 [Data Preparation Thread] Packing sequences"):
             packed_sequences = pack_sequences(
@@ -1505,7 +1554,7 @@ def data_preparation_thread(
             metrics = {
                 "scores": np.array(scores).mean(),
                 "real_batch_size_ratio": real_batch_size_ratio,
-                "unsolved_batch_size_ratio": unsolved_batch_size_ratio,
+                "unsolved_batch_size_ratio": unsolved_batch_size_ratio, #unsolved_batch_size_ratio,
                 "packed_ratio": len(packed_sequences.query_responses) / len(responses) if len(responses) > 0 else 0,
                 "val/sequence_lengths": sequence_lengths.mean(),
                 "val/sequence_lengths_min": sequence_lengths.min(),

@@ -8,6 +8,15 @@ to run:
 python scripts/data/rlvr/filter_existing_dataset_correctness.py \
   --files data/*.jsonl --output_file filtered.jsonl
 
+
+python rlvr/filter_existing_dataset_correctness.py   --files /weka/oe-adapt-default/tengx/Data/filter_MathSub/MathSub*.jsonl   --output_file /weka/oe-adapt-default/tengx/Data/filter_MathSub/MathSub_filtered.json  --lower_bound 0.125 --upper_bound 0.75
+
+python rlvr/filter_existing_dataset_correctness.py   --files /weka/oe-adapt-default/tengx/Data/filter_MathSub/orz*.jsonl   --output_file /weka/oe-adapt-default/tengx/Data/filter_MathSub/Orz_filtered.json  --lower_bound 0.125 --upper_bound 0.75
+
+
+python rlvr/filter_existing_dataset_correctness.py   --files /weka/oe-adapt-default/tengx/Data/filter_MathSub/omega*.jsonl   --output_file /weka/oe-adapt-default/tengx/Data/filter_MathSub/Omega_filtered.json  --lower_bound 0.125 --upper_bound 0.75 --hist_file_name omega_hist.png
+
+
 If you have code data, you might have to launch code server too before running:
 source configs/beaker_configs/code_api_setup.sh
 """
@@ -15,7 +24,7 @@ import argparse
 import json
 from functools import partial
 from multiprocessing import Pool, cpu_count, set_start_method
-
+import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -26,8 +35,8 @@ def _avg_correctness(sample, reward_fn_mapping):
     """
     Compute the mean correctness for one sample (called in worker).
     """
-    dataset = sample["dataset"][0]
-    gt = sample["ground_truth"][0]
+    dataset = sample["dataset"]
+    gt = sample["ground_truth"]
     outputs = sample["output"]
 
     reward_fn = reward_fn_mapping[dataset]
@@ -59,6 +68,15 @@ def main():
         default=None,
         help="Path to save filtered samples"
     )
+
+    parser.add_argument(
+        "--remap_verifier",
+        type=str,
+        default=None,
+        help="Remap verifier like string_f1=general-quality_ref. Currently can only remap once."
+    )
+
+
     parser.add_argument(
         "--lower_bound",
         type=float,
@@ -74,7 +92,7 @@ def main():
     parser.add_argument(
         "--hist_file_name",
         type=str,
-        default="hist.png",
+        default="orz_hist.png",
         help="Name of the histogram file"
     )
     parser.add_argument(
@@ -85,7 +103,7 @@ def main():
     )
     parser.add_argument(
         "--code_api_url",
-        default=None,
+        default=os.environ.get("CODE_API_URL", "http://localhost:1234") + "/test_program",
         type=str,
         help="Give a code api url to use for code verifier."
     )
@@ -125,6 +143,29 @@ def main():
         type=int,
         help="Give a seed for llm judge."
     )
+
+    parser.add_argument(
+        "--llm_judge_max_context_length",
+        default=8192,
+        type=int,
+        help="llm_judge_max_context_length."
+    )
+
+    parser.add_argument(
+        "--code_pass_rate_reward_threshold",
+        default=0.0,
+        type=float,
+        help="code_pass_rate_reward_threshold"
+    )
+
+    parser.add_argument(
+        "--code_apply_perf_penalty",
+        default=False,
+        type=bool,
+        help="code_apply_perf_penalty"
+    )
+
+    
     args = parser.parse_args()
     if args.lower_bound == 0 and args.upper_bound == 1:
         print("Upper bound is 1 and lower bound is 0. No filtering will be done, is this intended?")

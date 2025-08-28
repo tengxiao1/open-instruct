@@ -1,6 +1,16 @@
+import argparse
+import json
+
+from datasets import load_dataset
+from transformers import AutoTokenizer
+import sglang as sgl
+import time
+from tqdm import tqdm
+
+
 # python /weka/oe-adapt-default/tengx/main/open-instruct/mason.py \
 #   --cluster ai2/jupiter-cirrascale-2 \
-#   --image tengx/open_instruct_main_google2 --pure_docker_mode   \
+#   --image tengx/open_instruct_main_google2   \
 #   --workspace  ai2/olmo-instruct \
 #   --priority urgent \
 #   --preemptible \
@@ -8,7 +18,7 @@
 #   --budget ai2/oe-adapt \
 #   --num_nodes 1 \
 #   --max_retries 0 \
-#    -- python scripts/data/rlvr/filtering_vllm.py \
+#    -- python scripts/data/rlvr/filtering_sglang.py \
 #   --model /weka/oe-adapt-default/jacobm/checkpoints/olmo2-7B-sft/rl-sft/olmo2-7B-FINAL-lc-OT3-full-regen-wc-oasst-ccn-pif-qif-wgwj-syn2-aya-tgpt-ncode-scode \
 #   --dataset TTTXXX01/MathSub-30K  \
 #   --split train \
@@ -16,10 +26,8 @@
 #   --offset 0 \
 #   --size 1 \
 #   --tensor_parallel_size 1 \
-#   --output-file /weka/oe-adapt-default/tengx/main/open-instruct/scripts/data/MathSub_test_vllm_0_1_4gpu.jsonl \
-#   --number_samples 8
-
-
+#   --output-file /weka/oe-adapt-default/tengx/main/open-instruct/scripts/data/MathSub_test_sglang_0_1.jsonl \
+  
 CHAT_TEMPLATES = {
     "simple_concat_with_space": (
         "{% for message in messages %}"
@@ -477,23 +485,15 @@ CHAT_TEMPLATES = {
         "{% endfor %}"
     ),
 }
-import argparse
-import json
-
-from datasets import load_dataset
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-import time
-from tqdm import tqdm
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bulk-generate N samples per HF dataset record using vLLM."
+        description="Bulk-generate N samples per HF dataset record using SGLang (offline)."
     )
     parser.add_argument(
         "--model",
         required=True,
-        help="vLLM model ID (e.g. facebook/opt-125m)"
+        help="Model path (e.g. facebook/opt-125m)"
     )
     parser.add_argument(
         "--dataset",
@@ -546,12 +546,17 @@ def main():
         default=1.0,
         help="Sampling temperature"
     )
-
     parser.add_argument(
         "--tensor_parallel_size",
         type=int,
         default=1,
         help="Number of GPUs for tensor parallelism"
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        help="Data type for model weights"
     )
     args = parser.parse_args()
 
@@ -577,43 +582,69 @@ def main():
         )
         for sample in subset
     ]
-    # 4. vLLM bulk generate
+    
+    # 4. Initialize SGLang offline engine
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, range(args.tensor_parallel_size)))
-    llm = LLM(
-        model=args.model,
-        dtype="bfloat16",
-        enable_prefix_caching=True,
-        tensor_parallel_size=args.tensor_parallel_size
+    
+    engine = sgl.Engine(
+        model_path=args.model,
+        tp_size=args.tensor_parallel_size,
+        dtype=args.dtype,
     )
-    sampling_params = SamplingParams(
-        temperature=args.temperature,
-        n=args.number_samples,
-        max_tokens=32768,
-    )
+    sgl.set_default_backend(engine)
+    
+    # 5. Generate samples using simple approach
+    outputs = []
+
+
+
+    print(f"Generating {args.number_samples} samples per prompt, total {len(prompts)} prompts...")
 
     start_time = time.time()
-    outputs = llm.generate(prompts, sampling_params)
+    results = engine.generate(
+                prompts,
+                sampling_params={
+                    "temperature": args.temperature,
+                    "max_new_tokens": 32768,
+                    "n": args.number_samples,
+                },
+                stream=False
+            )
     end_time = time.time()
+    
     print(
-    f"vllm inference time: {end_time - start_time:.2f} seconds, "
+    f"sglang inference time: {end_time - start_time:.2f} seconds, "
     f"prompts: {len(prompts)}, samples per prompt: {args.number_samples}"
     )
+    outputs = []
 
-    # outputs = []
-    # for i, prompt in enumerate(tqdm(prompts, desc="Generating samples")):
-    #     output = llm.generate([prompt], sampling_params)
-    #     outputs.extend(output)
-    #     if (i + 1) % 100 == 0:  
-    #         print(f"Processed {i + 1}/{len(prompts)} samples")
 
-    # 5. Write out JSONL
+
+    print(f"#prompts={len(prompts)}, #results={len(results)}")
+
+    for i, prompt in enumerate(prompts):
+        print(f"Processing prompt {i + 1}/{len(prompts)}")  # Print first 50 chars of the prompt
+        start = i * args.number_samples  
+        end = start + args.number_samples
+        gens = [res["text"] for res in results[start:end]]
+        gen_prompt_tokens = [res["meta_info"]["prompt_tokens"] for res in results[start:end]]
+        outputs.append({"prompt": prompt, "outputs": gens, "prompt_tokens": gen_prompt_tokens})
+
+    print(f"Generated {len(outputs)} outputs.")
+    # print(f"Sample output for 1 prompt: {outputs[0]}")
+    # print(f"Sample output for 2 prompt: {outputs[1]}")
+    # print(f"Sample output for 3 prompt: {outputs[2]}")
+    for i in range(len(outputs)):
+        print (f"Sample output for 0 prompt: {len(outputs[i]['outputs'])} outputs, prompt tokens: {outputs[i]['prompt_tokens']}")
+
+
+    # 6. Write out JSONL
     if args.output_file is not None:
         with open(args.output_file, "w", encoding="utf-8") as out_f:
-            for sample, req_out in zip(subset, outputs):
-                gen_texts = [o.text for o in req_out.outputs]
+            for sample, gen_texts in zip(subset, outputs):
                 enriched = dict(sample)
-                enriched["output"] = gen_texts
+                enriched["output"] = gen_texts["outputs"]
                 out_f.write(json.dumps(enriched, ensure_ascii=False) + "\n")
 
     if args.push_to_hub is not None:
@@ -623,5 +654,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
+    

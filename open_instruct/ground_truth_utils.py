@@ -405,6 +405,27 @@ class StringMatcherVerifier(VerifierFunction):
         return VerificationResult(score=score)
 
 
+class ZebraMatcherVerifier(VerifierFunction):
+    """
+    Verifier for tasks that require string matching.
+
+    It checks if the model output matches the ground truth answer.
+    """
+
+    def __init__(self, verifier_config: Optional[VerifierConfig] = None) -> None:
+        super().__init__("Zebra", verifier_config=verifier_config, weight=1.0)
+
+    def __call__(
+        self, tokenized_prediction: List[int], prediction: str, label: str, query: Optional[str] = None
+    ) -> VerificationResult:
+        prediction = prediction.split("</think>")[-1]
+        # remove answer tags from the prediction
+        prediction = prediction.replace("<answer>", "").replace("</answer>", "")
+        # normalize
+        score = float(normalize_answer(prediction) == normalize_answer(label))
+        return VerificationResult(score=score)
+    
+
 class F1Verifier(VerifierFunction):
     """
     Verifier that computes the string F1 score between the prediction and the label.
